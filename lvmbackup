@@ -1,0 +1,578 @@
+#!/bin/bash
+#
+#
+#	LVM2 backup script
+#	created: Novosyolov V.A.
+#	e-mail: lagunax@email.ru
+#
+
+function t_Test {
+# by oToGamez
+# www.pro-toolz.net
+
+      E='echo -e';e='echo -en';trap "R;exit" 2
+    ESC=$( $e "\e")
+   TPUT(){ $e "\e[${1};${2}H";}
+  CLEAR(){ $e "\ec";}
+  CIVIS(){ $e "\e[?25l";}
+   DRAW(){ $e "\e%@\e(0";}
+  WRITE(){ $e "\e(B";}
+   MARK(){ $e "\e[7m";}
+ UNMARK(){ $e "\e[27m";}
+      R(){ CLEAR ;stty sane;$e "\ec\e[37;44m\e[J";};
+   HEAD(){ DRAW
+           for each in $(seq 1 13);do
+           $E "   x                                          x"
+           done
+           WRITE;MARK;TPUT 1 5
+           $E "BASH SELECTION MENU                       ";UNMARK;}
+           i=0; CLEAR; CIVIS;NULL=/dev/null
+   FOOT(){ MARK;TPUT 13 5
+           printf "ENTER - SELECT,NEXT                       ";UNMARK;}
+  ARROW(){ read -s -n3 key 2>/dev/null >&2
+           if [[ $key = $ESC[A ]];then echo up;fi
+           if [[ $key = $ESC[B ]];then echo dn;fi;}
+     M0(){ TPUT  4 20; $e "Login info";}
+     M1(){ TPUT  5 20; $e "Network";}
+     M2(){ TPUT  6 20; $e "Disk";}
+     M3(){ TPUT  7 20; $e "Routing";}
+     M4(){ TPUT  8 20; $e "Time";}
+     M5(){ TPUT  9 20; $e "ABOUT  ";}
+     M6(){ TPUT 10 20; $e "EXIT   ";}
+      LM=6
+   MENU(){ for each in $(seq 0 $LM);do M${each};done;}
+    POS(){ if [[ $cur == up ]];then ((i--));fi
+           if [[ $cur == dn ]];then ((i++));fi
+           if [[ $i -lt 0   ]];then i=$LM;fi
+           if [[ $i -gt $LM ]];then i=0;fi;}
+REFRESH(){ after=$((i+1)); before=$((i-1))
+           if [[ $before -lt 0  ]];then before=$LM;fi
+           if [[ $after -gt $LM ]];then after=0;fi
+           if [[ $j -lt $i      ]];then UNMARK;M$before;else UNMARK;M$after;fi
+           if [[ $after -eq 0 ]] || [ $before -eq $LM ];then
+           UNMARK; M$before; M$after;fi;j=$i;UNMARK;M$before;M$after;}
+   INIT(){ R;HEAD;FOOT;MENU;}
+     SC(){ REFRESH;MARK;$S;$b;cur=`ARROW`;}
+     ES(){ MARK;$e "ENTER = main menu ";$b;read;INIT;};INIT
+  while [[ "$O" != " " ]]; do case $i in
+        0) S=M0;SC;if [[ $cur == "" ]];then R;$e "\n$(w        )\n";ES;fi;;
+        1) S=M1;SC;if [[ $cur == "" ]];then R;$e "\n$(ifconfig )\n";ES;fi;;
+        2) S=M2;SC;if [[ $cur == "" ]];then R;$e "\n$(df -h    )\n";ES;fi;;
+        3) S=M3;SC;if [[ $cur == "" ]];then R;$e "\n$(route -n )\n";ES;fi;;
+        4) S=M4;SC;if [[ $cur == "" ]];then R;$e "\n$(date     )\n";ES;fi;;
+        5) S=M5;SC;if [[ $cur == "" ]];then R;$e "\n$($e by oTo)\n";ES;fi;;
+        6) S=M6;SC;if [[ $cur == "" ]];then R;exit 0;fi;;
+ esac;POS;done
+}
+
+
+function f_help {
+	echo "LVM2 backup script.
+Usage:
+	lvmbackup [OPTIONS]
+	Where OPTIONS are:
+		-l|--list - show list of backups available.
+		-b|--backup - backup all.
+		-d|--delete [BACKUP] - delete backup. If BACKUP not used, then delete oldest backup.
+		-r [BACKUP]|--restore [BACKUP] - restore all from last saved backup (or from BACKUP).
+		-h|--help|-? - show current help."
+}
+
+VOLUMES="Data System"
+SYSTEM="/dev/System/"
+DATA="/dev/Data/"
+BACKUP="/dev/Backup/"
+
+#where to store backups
+b_VG="Backup"	# Volume group
+b_Thin="BThin"	# Thin pool
+
+# volume for backups
+INFO="/dev/Backup/info"
+
+# mount point for backup-volume
+MINFO="/mnt/info"
+
+# 'info'-filenames
+FINFO="backup"
+
+# 'info'-files' permissions
+FPERM="640"
+
+MD="/bin/mkdir"
+RD="/bin/rm -R"
+MNT="/bin/mount"
+UMNT="/bin/umount"
+LV="/sbin/lv"
+VG="/sbin/vg"
+
+BDATE=`date +%d%m%Y_%H%M`
+declare -i BVER=1
+declare -i CVER=0
+declare -i BACKUPS=0
+LVSize=0
+declare -i b_SIZE_Need=0
+declare -i b_SIZE_Free=0
+
+# Maximum backups permited (oldest will be removed) (0 meens do not remove any backups, 
+# if fullfiled - then error)
+b_MAXBACKUPS=5
+
+# Fullfill Thin-volume with backups? (b_MAXBACKUPS will not be used)
+# (if no space will available then remove oldest backup)
+# "true" | "false" (do not casesensitive) 
+b_FULLFILL="true"
+
+#List of Volume Groups to work (* meens all VGs except "Backup")
+b_VGList="System Data"
+
+#List of Volumes to backup (* meens all volumes in b_VGList)
+b_LVList="*"
+
+VGNAME=""
+LVPath=""
+LVName=""
+LVUUID=""
+LVWriteAccess=""
+LVSize=""
+LVPoolName=""
+LVPoolMetadata=""
+LVPoolData=""
+LVThinOriginName=""
+
+function f_mount {
+	echo -n "Mounting ${INFO}..."
+	${LV}change -aey ${INFO}
+	${MD} ${MINFO}
+	${MNT} ${INFO} ${MINFO}
+	echo "OK!"
+}
+
+function f_umount {
+	${UMNT} ${MINFO}
+	${RD} ${MINFO}
+	${LV}change -an ${INFO}
+	echo "${MINFO} unmounted."
+}
+
+function f_list {
+
+	if [ -f "${MINFO}/${FINFO}" ]
+	then
+		echo "${MINFO}/${FINFO} found."
+		# Get info from general 'info'-file
+
+		BACKUPS=`wc -l < $MINFO/$FINFO`
+		readarray BDATA < $MINFO/$FINFO
+
+		# Enumerate backups
+		for (( NUMBACKUP=0; NUMBACKUP<${BACKUPS}; NUMBACKUP=NUMBACKUP + 1 ))
+		do
+			CDATE=`echo ${BDATA[$NUMBACKUP]} | sed 's/\([0-9_]\{13\}\).*/\1/'`
+			CVER=`echo ${BDATA[$NUMBACKUP]} | sed 's/^[0-9_]\{14\}\([0-9_]*\).*/\1/'`
+			echo "Backup: ${BDATA[$NUMBACKUP]} Date="$CDATE"; vertion="$CVER
+		done
+		echo "Total $BACKUPS backups saved"
+
+	else
+		echo "${MINFO}/${FINFO} not found.
+Backups not present on drive ${INFO}!"
+	fi
+
+}
+
+function f_backup {
+
+	# Search general 'info'-file. If not present, then create it.
+
+	if [ -f "${MINFO}/${FINFO}" ]
+	then
+		echo "${MINFO}/${FINFO} found."
+	else
+		echo "${MINFO}/${FINFO} not found."
+		touch ${MINFO}/${FINFO}
+		chmod $FPERM ${MINFO}/${FINFO}
+		echo "${MINFO}/${FINFO} created."
+	fi
+
+
+	# Get info from general 'info'-file
+
+	BACKUPS=`wc -l < $MINFO/$FINFO`
+	readarray BDATA < $MINFO/$FINFO
+
+	# check to fullfill
+
+	if [ "$b_FULLFILL" = "[t|T][r|R][u|U][e|E]" ]
+	then
+
+		echo "Fullfilling.......
+To delete backups use '-d|--delete' option."
+	else
+		# Use b_MAXBACKUPS
+		if [ "$b_MAXBACKUPS" > 0 ]
+		then
+
+			echo "Check if backups reached maximum permited"
+			echo $BACKUPS $b_MAXBACKUPS
+			#if [ "$BACKUPS" -gt "$b_MAXBACKUPS" ]
+			#then
+				while [[ $BACKUPS -ge $b_MAXBACKUPS ]]
+				do
+					echo -n "Removing oldest backup: "
+
+					CDATE=`echo ${BDATA[0]} | sed 's/\([0-9_]\{13\}\).*/\1/'`
+					CVER=`echo ${BDATA[0]} | sed 's/^[0-9_]\{14\}\([0-9_]*\).*/\1/'`
+					echo -n "Date=$CDATE, Ver.=$CVER. |"
+					f_delete $CDATE"_"$CVER
+
+#	echo -n $!
+					#PID =`ps -p $! -o pid=`
+
+				#	while true
+				#	do
+				#		if [ -n "$PID" ]
+				#		then
+				#			echo -n "."
+				#		else
+				#			break
+				#		fi
+				#		sleep 1
+				#	done
+
+					BACKUPS=`wc -l < $MINFO/$FINFO`
+					readarray BDATA < $MINFO/$FINFO
+
+				done
+
+				echo -ne "|"\\n"Done!"\\n
+
+			#else
+			#	echo "Add new backup"
+				#$BVER=${BACKUPS} + 1;
+			#fi
+		else
+			echo "Will check available disk space for backup images"
+		fi
+	fi
+
+	# Search if backup with current date is present
+	if [ $BACKUPS -gt 0 ]
+	then
+		CDATE=`echo ${BDATA[$BACKUPS-1]} | sed 's/\([0-9_]\{13\}\).*/\1/'`
+		CVER=`echo ${BDATA[$BACKUPS-1]} | sed 's/^[0-9_]\{14\}\([0-9_]*\).*/\1/'`
+	fi
+
+	# Configure name for backup
+	if [ "$BDATE" = "$CDATE" ]
+	then
+		BVER=$CVER;
+		BVER+=1;
+	fi
+
+	echo "Current backup: "$BDATE"_"$BVER
+
+
+	# Create backup`s 'info'-file end write vertion into $MINFO/$FINFO
+
+	b_FILE=$MINFO/$FINFO"_"$BDATE"_"$BVER
+	touch $b_FILE
+	echo $BDATE"_"$BVER >> $MINFO/$FINFO
+
+
+	${LV}display --units B ${VOLUMES}| while read line; do
+		if [ "$line" = "" ] ; then {
+
+			# Check if device is not Thin pool
+			if [ -n $LVPath ]
+			then
+
+				# Make Backup of device
+				b_SIZE_Need=${b_SIZE_Need}+${LVSize}
+
+				echo -n "Backup: "${VGName}/$LVName"... ";
+				echo -n "Need size for backup: "${b_SIZE_Need}". "
+
+				echo "Image Name:"${VGName}"_"$LVName"_"$BDATE"_"$BVER
+				${LV}create -V ${LVSize}B -T ${b_VG}/${b_Thin} -n ${VGName}"_"$LVName"_"$BDATE"_"$BVER -y
+				dd if=/dev/${VGName}/$LVName | /usr/bin/pv | dd of=/dev/${b_VG}/${VGName}"_"$LVName"_"$BDATE"_"$BVER
+
+				echo "OK"
+				echo "---" >> $b_FILE
+
+				VGNAME=""
+				LVPath=""
+				LVName=""
+				LVUUID=""
+				LVWriteAccess=""
+				LVSize=""
+				LVPoolName=""
+				LVPoolMetadata=""
+				LVPoolData=""
+				LVThinOriginName=""
+
+			fi;
+
+		} else {
+
+			# Fill Data for backup
+			if [ `echo $line | awk '{ print $1 }'` = VG ] ; then {
+				VGName=`echo $line | awk '{ print $3 }'`
+				echo $line >> $b_FILE
+			} fi;
+
+			if [ `echo $line | awk '{ print $1 }'` = LV ] ; then {
+				echo $line >> $b_FILE
+				case `echo $line | awk '{ print $1 $2 }'` in
+					"LVPath")
+						LVPath=`echo $line | awk '{ print $3 }'`
+						;;
+					"LVName")
+						LVName=`echo $line | awk '{ print $3 }'`
+						;;
+					"LVUUID")
+						LVUUID=`echo $line | awk '{ print $3 }'`
+						;;
+					"LVWrite")
+						LVWriteAccess=`echo $line | awk '{ print $4 }'`
+						;;
+					"LVSize")
+						LVSize=`echo $line | awk '{ print $3 }'` #`echo $line | awk '{ print $4 }'`
+						;;
+					"LVPool")
+						case `echo $line | awk '{ print $3 }'` in
+							"name")
+								LVPoolName=`echo $line | awk '{ print $4 }'`
+								;;
+							"metadata")
+								LVPoolMetadata=`echo $line | awk '{ print $4 }'`
+								;;
+							"data")
+								LVPoolData=`echo $line | awk '{ print $4 }'`
+								;;
+							*)
+								;;
+						esac
+						#echo "LVPool = "`echo $line | awk '{ print $3 }'`
+						#echo "	LVPool"`echo $line | awk '{ print $3 }'`" = "`echo $line | awk '{ print $4 }'`
+						;;
+					"LVThin")
+						#echo $line | awk '{ print $3 $4 }'
+						if [ `echo $line | awk '{ print $3 $4}'` = originname ] ; then {
+							echo $line | awk '{ print $5 }'
+							LVThinOriginName=`echo $line | awk '{ print $5 }'`
+						} fi;
+						;;
+					*)
+						;;
+				esac
+			} fi;
+
+		} fi;
+	done
+	echo "Need size for backup: "${b_SIZE_Need}
+
+	#echo $LVD
+}
+
+function f_delete {
+#Delete selected backup
+
+	F_BCKEXISTS=0
+	F_BACKUP=''
+
+        if [ -f "${MINFO}/${FINFO}" ]
+        then
+                echo "${MINFO}/${FINFO} found."
+                # Get info from general 'info'-file
+
+                BACKUPS=`wc -l < $MINFO/$FINFO`
+                readarray BDATA < $MINFO/$FINFO
+
+                # Enumerate backups
+                for (( NUMBACKUP=0; NUMBACKUP<${BACKUPS}; NUMBACKUP=NUMBACKUP + 1 ))
+                do
+			if [ -z "$1" ]
+			then
+				F_BCKEXISTS=1
+				F_BACKUP=${BDATA[$NUMBACKUP]}
+				break
+			else
+				if [ $1 = ${BDATA[$NUMBACKUP]} ]
+				then
+		                        CDATE=`echo ${BDATA[$NUMBACKUP]} | sed 's/\([0-9_]\{13\}\).*/\1/'`
+		                        CVER=`echo ${BDATA[$NUMBACKUP]} | sed 's/^[0-9_]\{14\}\([0-9_]*\).*/\1/'`
+		                        echo "Date="$CDATE"; vertion="$CVER
+					F_BCKEXISTS=1
+					F_BACKUP=${BDATA[$NUMBACKUP]}
+				fi
+			fi
+                done
+		if [ ${F_BCKEXISTS} = 1 ]
+		then 
+
+			#BACKUP_NUM_OF_LINES=`wc -l < $MINFO/$FINFO"_"$CDATE"_"$CVER`
+			#readarray BDATA < $MINFO/$FINFO"_"$CDATE"_"$CVER
+
+                                VGNAME=""
+                                LVPath=""
+                                LVName=""
+                                LVUUID=""
+                                LVWriteAccess=""
+                                LVSize=""
+                                LVPoolName=""
+                                LVPoolMetadata=""
+                                LVPoolData=""
+                                LVThinOriginName=""
+
+			if [ -f "$MINFO/$FINFO"_"$CDATE"_"$CVER" ]
+			then {
+		                BACKUPS_INFO=`wc -l < $MINFO/$FINFO"_"$CDATE"_"$CVER`
+                		readarray BIDATA < $MINFO/$FINFO"_"$CDATE"_"$CVER
+
+				#cat $MINFO/$FINFO"_"$CDATE"_"$CVER
+				for (( NUMBACKUPI=0; NUMBACKUPI<${BACKUPS_INFO}; NUMBACKUPI=NUMBACKUPI + 1 ))
+				do
+					line=${BIDATA[$NUMBACKUPI]}
+					#echo $line
+					if [ `echo $line | awk '{ print $1 }'` = "---" ]
+					then {
+						echo "LV remove: Backup/${VGName}_${LVName}_${CDATE}_${CVER}"
+						lvremove -f Backup/${VGName}_${LVName}_${CDATE}_${CVER}
+
+		                                VGNAME=""
+		                                LVPath=""
+		                                LVName=""
+		                                LVUUID=""
+		                                LVWriteAccess=""
+		                                LVSize=""
+		                                LVPoolName=""
+		                                LVPoolMetadata=""
+		                                LVPoolData=""
+		                                LVThinOriginName=""
+
+					} fi;
+
+		                        # Fill Data for backup
+		                        if [ `echo $line | awk '{ print $1 }'` = VG ] ; then {
+		                                VGName=`echo $line | awk '{ print $3 }'`
+		                        } fi;
+
+		                        if [ `echo $line | awk '{ print $1 }'` = LV ] ; then {
+		                                case `echo $line | awk '{ print $1 $2 }'` in
+		                                        "LVPath")
+		                                                LVPath=`echo $line | awk '{ print $3 }'`
+		                                                ;;
+		                                        "LVName")
+		                                                LVName=`echo $line | awk '{ print $3 }'`
+		                                                ;;
+		                                        "LVUUID")
+		                                                LVUUID=`echo $line | awk '{ print $3 }'`
+		                                                ;;
+		                                        "LVWrite")
+		                                                LVWriteAccess=`echo $line | awk '{ print $4 }'`
+		                                                ;;
+		                                        "LVSize")
+		                                                LVSize=`echo $line | awk '{ print $3 }'` #`echo $line | awk '{ print $4 }'`
+		                                                ;;
+		                                        "LVPool")
+		                                                case `echo $line | awk '{ print $3 }'` in
+		                                                        "name")
+		                                                                LVPoolName=`echo $line | awk '{ print $4 }'`
+		                                                                ;;
+		                                                        "metadata")
+		                                                                LVPoolMetadata=`echo $line | awk '{ print $4 }'`
+		                                                                ;;
+		                                                        "data")
+		                                                                LVPoolData=`echo $line | awk '{ print $4 }'`
+		                                                                ;;
+		                                                        *)
+		                                                                ;;
+		                                                esac
+		                                                #echo "LVPool = "`echo $line | awk '{ print $3 }'`
+		                                                #echo " LVPool"`echo $line | awk '{ print $3 }'`" = "`echo $line | awk '{ print $4 }'`
+		                                                ;;
+		                                        "LVThin")
+		                                                #echo $line | awk '{ print $3 $4 }'
+		                                                if [ `echo $line | awk '{ print $3 $4}'` = originname ] ; then {
+		                                                        echo $line | awk '{ print $5 }'
+		                                                        LVThinOriginName=`echo $line | awk '{ print $5 }'`
+		                                                } fi;
+		                                                ;;
+		                                        *)
+
+		                                                ;;
+		                                esac
+		                        } fi;
+				done
+			} fi;
+
+			sed -i '/'$CDATE"_"$CVER'/d' $MINFO/$FINFO
+			rm $MINFO/$FINFO"_"$CDATE"_"$CVER
+			echo '/'$CDATE"_"$CVER'/d'
+			echo $MINFO/$FINFO"_"$CDATE"_"$CVER
+			echo "Backup "${F_BACKUP}" deleted."
+		else
+			echo "Backup "${F_BACKUP}" not present!"
+		fi
+
+        else
+                echo "${MINFO}/${FINFO} not found.
+Backups not present on drive ${INFO}!"
+        fi
+
+}
+
+function f_restore {
+echo "restore not implemented"
+}
+
+if [[ $# -eq 0 ]]
+then
+	f_help
+fi
+while [[ $# -gt 0 ]]
+do
+key="$1"
+
+case $key in
+	-l|--list)
+		f_mount
+		f_list
+		f_umount
+		shift # past argument
+	;;
+	-r|--restore)
+		f_mount
+		f_restore
+		f_umount
+		shift # past argument
+	;;
+	-b|--backup)
+		f_mount
+		f_backup
+		f_umount
+		shift # past argument
+	;;
+        -d|--delete)
+                f_mount
+                f_delete $2
+                f_umount
+                shift # past argument
+        ;;
+	-h|--help|-?)
+		f_help
+		shift
+	;;
+	--test)
+		t_Test
+		shift
+	;;
+	*)
+#		f_help
+		# unknown option
+        ;;
+esac
+shift # past argument or value
+done
+
